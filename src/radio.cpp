@@ -32,31 +32,46 @@ char current_transmission[BUFFER_SIZE];
 
 // NEED MORE ELEGANT SERCOM HANDLER
 
-#if (HWREV == 102)
-  #define HEADER_TX 8
-  #define HEADER_RX 17
+Uart* SerialHeader = NULL;
+uint8_t serial_header_sercom = -1;
 
-  Uart SerialHeader(&sercom0, HEADER_RX, HEADER_TX, SERCOM_RX_PAD_0, UART_TX_PAD_2);
+void SERCOM0_Handler()
+{
+  if (SerialHeader && serial_header_sercom == 0)
+    (*SerialHeader).IrqHandler();
+}
 
-  void SERCOM0_Handler()
-  {
-    SerialHeader.IrqHandler();
-  }
+void SERCOM1_Handler()
+{
+  if (SerialHeader && serial_header_sercom == 1)
+    (*SerialHeader).IrqHandler();
+}
 
-#endif
+void SERCOM2_Handler()
+{
+  if (SerialHeader && serial_header_sercom == 2)
+    (*SerialHeader).IrqHandler();
+}
 
+void SERCOM3_Handler()
+{
+  if (SerialHeader && serial_header_sercom == 3)
+    (*SerialHeader).IrqHandler();
+}
 
-#if (HWREV == 100)
-  #define HEADER_TX_PIN 10
-  #define HEADER_RX_PIN 11
+void SERCOM4_Handler()
+{
+  if (SerialHeader && serial_header_sercom == 4)
+    (*SerialHeader).IrqHandler();
+}
 
-  Uart SerialHeader(&sercom1, HEADER_RX_PIN, HEADER_TX_PIN, SERCOM_RX_PAD_2, UART_TX_PAD_0);
-
-  void SERCOM1_Handler()
-  {
-    SerialHeader.IrqHandler();
-  }
-#endif
+// This might affect the debug serial port, but the other handler is commented
+// out in variant.cpp anyway.
+void SERCOM5_Handler()
+{
+  if (SerialHeader && serial_header_sercom == 5)
+    (*SerialHeader).IrqHandler();
+}
 
 S6C s6c;
 
@@ -91,6 +106,19 @@ struct radio_config {
   bool tdma_enabled = 1;
   uint8_t epoch_slots = 16;
   uint16_t allocated_slots = ~0b0101010101010101; // which slot(s) this device is permitted to transmit in
+#if (HWREV == 100)
+  uint8_t sercom = 1;
+  uint8_t sercom_rx = 11;
+  uint8_t sercom_tx = 10;
+  uint8_t sercom_rx_pad = 2;
+  uint8_t sercom_tx_pad = 0;
+#else
+  uint8_t sercom = 0;
+  uint8_t sercom_rx = 17;
+  uint8_t sercom_tx = 8;
+  uint8_t sercom_rx_pad = 0;
+  uint8_t sercom_tx_pad = 2;
+#endif
 };
 
 struct radio_config global_config;      // global config
@@ -103,6 +131,49 @@ uint32_t quicksave_acktime = 0;
 
 uint32_t last_transmission_time = 0;
 bool force_transmit = false;
+
+
+void update_sercom_from_config() {
+  SerialUSB.println("updating sercom config");
+  uint8_t sercom = global_config.sercom;
+  uint8_t sercom_rx = global_config.sercom_rx;
+  uint8_t sercom_tx = global_config.sercom_tx;
+  uint8_t sercom_rx_pad = global_config.sercom_rx_pad;
+  uint8_t sercom_tx_pad = global_config.sercom_tx_pad;
+
+  // blindly tries to set up the sercom with the provided config
+  // (only validates that the necessary constants actually exist,
+  // not whether the config makes sense)
+  if (sercom_rx_pad > 3 || sercom_tx_pad == 1 || sercom_tx_pad > 2 || sercom > 5) {
+#if (HWREV == 100)
+    SerialUSB.println("Error: invalid sercom config. Defaulting to RX=11 and TX=10.");
+    sercom = 1;
+    sercom_rx = 11;
+    sercom_tx = 10;
+    sercom_rx_pad = 2;
+    sercom_tx_pad = 0;
+#else
+    SerialUSB.println("Error: invalid sercom config. Defaulting to RX=17 and TX=8.");
+    sercom = 0;
+    sercom_rx = 17;
+    sercom_tx = 8;
+    sercom_rx_pad = 0;
+    sercom_tx_pad = 2;
+#endif
+  }
+  if (SerialHeader) {
+    // neither Uart nor its ancestors define a destructor
+    // this may cause issues
+    delete SerialHeader;
+    SerialHeader = NULL;
+  }
+  SERCOM *sercoms[6] = {&sercom0, &sercom1, &sercom2, &sercom3, &sercom4, &sercom5};
+  SercomRXPad rx_pads[4] = {SERCOM_RX_PAD_0, SERCOM_RX_PAD_1, SERCOM_RX_PAD_2, SERCOM_RX_PAD_3};
+  SercomUartTXPad tx_pads[3] = {UART_TX_PAD_0, UART_TX_PAD_0, UART_TX_PAD_2};
+  SerialHeader = new Uart(sercoms[sercom], sercom_rx, sercom_tx, rx_pads[sercom_rx_pad], tx_pads[sercom_tx_pad]);
+  serial_header_sercom = sercom;
+  SerialUSB.println("done updating sercom");
+}
 
 
 /* ************************************************************************* */
@@ -330,7 +401,7 @@ uint16_t min_tx_space(uint8_t port) {
   uint16_t n = 1;
   switch(port) {
     case 0: n = SerialUSB.availableForWrite(); break;
-    case 1: n = SerialHeader.availableForWrite(); break;
+    case 1: n = (*SerialHeader).availableForWrite(); break;
     default: break;
   }
   return n;
@@ -339,7 +410,7 @@ uint16_t min_tx_space(uint8_t port) {
 void min_tx_byte(uint8_t port, uint8_t byte) {
   switch(port) {
     case 0: SerialUSB.write(&byte, 1U); break;
-    case 1: SerialHeader.write(&byte, 1U); break;
+    case 1: (*SerialHeader).write(&byte, 1U); break;
     default: break;
   }
 }
@@ -477,7 +548,7 @@ void min_application_handler(uint8_t min_id, uint8_t *min_payload, uint8_t len_p
 
           switch(port) {
             case 0: SerialUSB.println(hwid, HEX); break;
-            case 1: SerialHeader.println(hwid, HEX); break;
+            case 1: (*SerialHeader).println(hwid, HEX); break;
             default: break;// command initiated over radio; ignore
           }
           break;
@@ -488,7 +559,7 @@ void min_application_handler(uint8_t min_id, uint8_t *min_payload, uint8_t len_p
 
         switch(port) {
           case 0: SerialUSB.println("setting HWID"); break;
-          case 1: SerialHeader.println("setting HWID"); break;
+          case 1: (*SerialHeader).println("setting HWID"); break;
           default: break;// command initiated over radio; ignore
         }
 
@@ -500,7 +571,7 @@ void min_application_handler(uint8_t min_id, uint8_t *min_payload, uint8_t len_p
       case MESSAGE_CLEAR_HWID_FUSE: // don't do it!
         switch(port) {
           case 0: SerialUSB.println("clearing HWID fuse"); break;
-          case 1: SerialHeader.println("clearing HWID fuse"); break;
+          case 1: (*SerialHeader).println("clearing HWID fuse"); break;
           default: break;// command initiated over radio; ignore
         }
         if(port != 2) s6c.clearHWIDfuse();
@@ -530,6 +601,51 @@ void min_application_handler(uint8_t min_id, uint8_t *min_payload, uint8_t len_p
         break;
       case MESSAGE_TDMA_ENABLE:
     		global_config.tdma_enabled = 1;
+    		i += 1;
+    		break;
+      case MESSAGE_SERCOM_SET:
+        if (remaining < 2) { break_out = true; break; }
+        memcpy(&vi, min_payload + i + 1, 2);
+    		if (vi >= 0 && vi <= 5) {
+    			SerialUSB.println("Setting sercom");
+    			global_config.sercom = vi;
+    		}
+        i += 3;
+        break;
+      case MESSAGE_SERCOM_SET_RX:
+        if (remaining < 2) { break_out = true; break; }
+        memcpy(&vi, min_payload + i + 1, 2);
+        SerialUSB.println("Setting sercom rx");
+        global_config.sercom_rx = vi;
+        i += 3;
+        break;
+      case MESSAGE_SERCOM_SET_TX:
+        if (remaining < 2) { break_out = true; break; }
+        memcpy(&vi, min_payload + i + 1, 2);
+        SerialUSB.println("Setting sercom tx");
+        global_config.sercom_tx = vi;
+        i += 3;
+        break;
+      case MESSAGE_SERCOM_SET_RX_PAD:
+        if (remaining < 2) { break_out = true; break; }
+        memcpy(&vi, min_payload + i + 1, 2);
+    		if (vi >= 0 && vi <= 3) {
+    			SerialUSB.println("Setting sercom rx pad");
+    			global_config.sercom_rx_pad = vi;
+    		}
+        i += 3;
+        break;
+      case MESSAGE_SERCOM_SET_TX_PAD:
+        if (remaining < 2) { break_out = true; break; }
+        memcpy(&vi, min_payload + i + 1, 2);
+    		if (vi == 0 || vi == 2) {
+    			SerialUSB.println("Setting sercom tx pad");
+    			global_config.sercom_tx_pad = vi;
+    		}
+        i += 3;
+        break;
+      case MESSAGE_SERCOM_UPDATE:
+    		update_sercom_from_config();
     		i += 1;
     		break;
       default:
@@ -569,10 +685,10 @@ void TC3_Handler() {
       min_poll(&min_ctx_usb, 0, 0);
     }
 
-    available = SerialHeader.available();
+    available = (*SerialHeader).available();
     if (available > 0) {
       if (available > 32) available = 32;
-      size_t buf_len = SerialHeader.readBytes(serial_buffer_header, available);
+      size_t buf_len = (*SerialHeader).readBytes(serial_buffer_header, available);
       min_poll(&min_ctx_header, (uint8_t*)serial_buffer_header, (uint8_t)buf_len);
     } else {
       min_poll(&min_ctx_header, 0, 0);
@@ -609,10 +725,6 @@ void setup() {
   SerialUSB.setTimeout(1);
   SerialUSB.println("Starting...");
 
-  SerialHeader.begin(HEADER_SERIAL_BAUD);
-  //pinPeripheral(HEADER_RX_PIN, PIO_SERCOM);
-  //pinPeripheral(HEADER_TX_PIN, PIO_SERCOM);
-
   SerialUSB.println("Configuring RF...");
   s6c.configureRF();
   apply_global_config();
@@ -624,6 +736,11 @@ void setup() {
     read_eeprom_config((uint8_t*) &global_config);
     memcpy(&last_eeprom_config, &global_config, sizeof(global_config));
   }
+
+  update_sercom_from_config();
+  (*SerialHeader).begin(HEADER_SERIAL_BAUD);
+  //pinPeripheral(HEADER_RX_PIN, PIO_SERCOM);
+  //pinPeripheral(HEADER_TX_PIN, PIO_SERCOM);
 
 
   SerialUSB.println("Configured.");
